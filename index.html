@@ -1,0 +1,986 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>書き殴りメモ帳</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Yomogi&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  :root{
+    --cork-a:#8a6a44;
+    --cork-b:#6e5236;
+    --ink:#2e2118;
+    --ink-soft:#5a4636;
+    --paper-shadow: 0 6px 14px rgba(20,12,4,.35), 0 1px 0 rgba(255,255,255,.15) inset;
+    --string:#b23a2e;
+    --pin:#8a1f1f;
+    --ui-bg: rgba(38,28,18,.92);
+    --ui-fg:#f3e9d8;
+    --note-yellow:#f5e27a;
+    --note-pink:#f3afc4;
+    --note-mint:#b7e4c7;
+    --note-sky:#a9d6e5;
+  }
+  *{box-sizing:border-box;}
+  html,body{
+    margin:0; padding:0; width:100%; height:100%;
+    overflow:hidden;
+    font-family:'Zen Kaku Gothic New', sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body{
+    background-color: var(--cork-a);
+    background-image:
+      radial-gradient(circle at 20% 30%, rgba(255,255,255,.05) 0, transparent 40px),
+      radial-gradient(circle at 70% 65%, rgba(0,0,0,.08) 0, transparent 50px),
+      repeating-radial-gradient(circle at 0 0, rgba(0,0,0,.05) 0, rgba(0,0,0,.05) 1px, transparent 2px, transparent 8px);
+  }
+
+  #board{
+    position:relative;
+    width:3000px;
+    height:2200px;
+    overflow:visible;
+    cursor: crosshair;
+  }
+  #boardScroll{
+    position:absolute; inset:0;
+    overflow:auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  #strings{
+    position:absolute; left:0; top:0;
+    width:3000px; height:2200px;
+    pointer-events:none;
+    overflow:visible;
+  }
+
+  .sticky{
+    position:absolute;
+    width:180px;
+    min-height:130px;
+    padding:22px 14px 34px 14px;
+    background: var(--note-yellow);
+    box-shadow: var(--paper-shadow);
+    border-radius:2px 2px 6px 6px;
+    font-family:'Yomogi', sans-serif;
+    color: var(--ink);
+    cursor: grab;
+    touch-action:none;
+    transition: box-shadow .15s ease;
+    user-select:none;
+  }
+  .sticky.dragging{
+    cursor: grabbing;
+    z-index: 500;
+    box-shadow: 0 16px 30px rgba(0,0,0,.45);
+  }
+  .sticky.linksrc{
+    outline: 3px solid var(--string);
+    outline-offset: 2px;
+  }
+  .sticky .pin{
+    position:absolute;
+    top:-9px; left:50%; transform:translateX(-50%);
+    width:16px; height:16px;
+    border-radius:50%;
+    background: radial-gradient(circle at 35% 30%, #e2665a, var(--pin));
+    box-shadow: 0 3px 4px rgba(0,0,0,.4);
+    cursor: crosshair;
+    z-index:2;
+  }
+  .sticky textarea{
+    width:100%; height:100%;
+    min-height:80px;
+    resize:none;
+    border:none; outline:none;
+    background:transparent;
+    font-family:'Yomogi', sans-serif;
+    font-size:16px;
+    line-height:1.5;
+    color: var(--ink);
+    cursor:text;
+  }
+  .sticky .toolbar{
+    position:absolute;
+    bottom:4px; right:6px;
+    display:flex; gap:4px;
+    opacity:0;
+    transition: opacity .12s ease;
+  }
+  .sticky:hover .toolbar, .sticky.editing .toolbar{
+    opacity:1;
+  }
+  .sticky .toolbar button{
+    border:none;
+    background: rgba(0,0,0,.12);
+    border-radius:5px;
+    width:24px; height:24px;
+    font-size:13px;
+    line-height:1;
+    cursor:pointer;
+  }
+  .sticky .toolbar button:active{ background: rgba(0,0,0,.25); }
+
+  .note-yellow{ background: var(--note-yellow); }
+  .note-pink{ background: var(--note-pink); }
+  .note-mint{ background: var(--note-mint); }
+  .note-sky{ background: var(--note-sky); }
+
+  /* 新規作成中の付箋 */
+  .sticky.new-note{
+    box-shadow: 0 0 0 3px rgba(255,255,255,.5), var(--paper-shadow);
+  }
+
+  /* 上部ツールバー */
+  #topbar{
+    position:fixed; top:0; left:0; right:0;
+    display:flex; align-items:center; justify-content:space-between;
+    padding:10px 14px;
+    background: var(--ui-bg);
+    color: var(--ui-fg);
+    z-index:1000;
+    font-size:14px;
+  }
+  #topbar h1{
+    font-size:15px; font-weight:700; margin:0;
+    font-family:'Yomogi', sans-serif;
+    letter-spacing:.02em;
+  }
+  #topbar .right{ display:flex; gap:8px; align-items:center; }
+  #topbar button{
+    background: rgba(255,255,255,.08);
+    border: 1px solid rgba(255,255,255,.18);
+    color: var(--ui-fg);
+    border-radius:8px;
+    padding:7px 10px;
+    font-size:13px;
+    cursor:pointer;
+    font-family:'Zen Kaku Gothic New', sans-serif;
+  }
+  #topbar button:active{ background: rgba(255,255,255,.2); }
+  #syncDot{
+    width:8px; height:8px; border-radius:50%;
+    background:#7bd88f;
+    display:inline-block;
+    margin-right:5px;
+    box-shadow:0 0 4px #7bd88f;
+  }
+  #syncDot.off{ background:#d97a7a; box-shadow:0 0 4px #d97a7a;}
+
+  /* 貼り付けFAB */
+  #pasteFab{
+    position:fixed; right:18px; bottom:18px;
+    background: var(--ui-bg);
+    color: var(--ui-fg);
+    border:1px solid rgba(255,255,255,.2);
+    border-radius:999px;
+    padding:13px 18px;
+    font-size:14px;
+    z-index:900;
+    cursor:pointer;
+    box-shadow: 0 6px 16px rgba(0,0,0,.4);
+  }
+
+  /* 色選択（新規作成時） */
+  #colorPicker{
+    position:absolute;
+    display:none;
+    gap:6px;
+    background: var(--ui-bg);
+    padding:6px;
+    border-radius:8px;
+    z-index:600;
+  }
+  #colorPicker.show{ display:flex; }
+  #colorPicker span{
+    width:20px; height:20px; border-radius:50%;
+    cursor:pointer;
+    border:2px solid rgba(255,255,255,.3);
+  }
+
+  /* トースト */
+  #toast{
+    position:fixed; left:50%; bottom:80px; transform:translateX(-50%) translateY(20px);
+    background: var(--ui-bg); color:var(--ui-fg);
+    padding:9px 16px; border-radius:20px;
+    font-size:13px;
+    opacity:0; pointer-events:none;
+    transition: opacity .2s ease, transform .2s ease;
+    z-index:2000;
+  }
+  #toast.show{ opacity:1; transform:translateX(-50%) translateY(0); }
+
+  /* ゴミ箱パネル */
+  #trashPanel{
+    position:fixed; top:0; right:-320px; width:300px; height:100%;
+    background: var(--ui-bg); color: var(--ui-fg);
+    z-index:1500;
+    padding:16px;
+    overflow-y:auto;
+    transition: right .2s ease;
+  }
+  #trashPanel.open{ right:0; }
+  #trashPanel h2{ font-size:15px; margin:0 0 12px 0; font-family:'Yomogi', sans-serif;}
+  .trash-item{
+    background: rgba(255,255,255,.08);
+    border-radius:8px;
+    padding:10px;
+    margin-bottom:8px;
+    font-size:13px;
+  }
+  .trash-item p{ margin:0 0 8px 0; white-space:pre-wrap; word-break:break-word; max-height:60px; overflow:hidden;}
+  .trash-item .row{ display:flex; gap:6px; }
+  .trash-item button{
+    flex:1;
+    background: rgba(255,255,255,.1);
+    border:1px solid rgba(255,255,255,.2);
+    color:var(--ui-fg);
+    border-radius:6px;
+    padding:5px;
+    font-size:12px;
+    cursor:pointer;
+  }
+  #trashEmpty{ opacity:.6; font-size:13px; }
+  #closeTrash{
+    position:absolute; top:14px; right:14px;
+    background:none; border:none; color:var(--ui-fg);
+    font-size:18px; cursor:pointer;
+  }
+
+  #configWarning{
+    position:fixed; inset:0; background:rgba(20,14,8,.95); color:#f3e9d8;
+    z-index:5000; display:flex; align-items:center; justify-content:center;
+    padding:24px; text-align:center; font-size:14px; line-height:1.7;
+  }
+  #configWarning code{ background:rgba(255,255,255,.1); padding:2px 6px; border-radius:4px; }
+
+  /* 合言葉ゲート */
+  #passGate{
+    position:fixed; inset:0; background:rgba(20,14,8,.97); color:#f3e9d8;
+    z-index:4000; display:flex; align-items:center; justify-content:center;
+    padding:24px;
+  }
+  #passGate.hidden{ display:none; }
+  #passGate .box{
+    max-width:340px; width:100%; text-align:center;
+  }
+  #passGate h2{ font-family:'Yomogi', sans-serif; font-size:20px; margin:0 0 8px 0; }
+  #passGate p{ font-size:13px; opacity:.8; line-height:1.6; margin:0 0 18px 0; }
+  #passGate input{
+    width:100%; padding:11px 12px; font-size:15px;
+    border-radius:8px; border:1px solid rgba(255,255,255,.25);
+    background: rgba(255,255,255,.08); color:#f3e9d8;
+    margin-bottom:10px;
+  }
+  #passGate button{
+    width:100%; padding:11px; font-size:14px; border-radius:8px;
+    border:1px solid rgba(255,255,255,.25);
+    background: rgba(255,255,255,.14); color:#f3e9d8;
+    cursor:pointer;
+  }
+  #passGate .err{ color:#e08a7d; font-size:12px; min-height:16px; margin-top:8px; }
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <h1>📝 書き殴りメモ帳</h1>
+  <div class="right">
+    <span><span id="syncDot"></span><span id="syncLabel">同期中</span></span>
+    <button id="linkModeBtn">🧵 つなぐ</button>
+    <button id="trashBtn">🗑️ ゴミ箱 (<span id="trashCount">0</span>)</button>
+    <button id="forgetBtn" title="この端末に記憶した合言葉の鍵を消します">🔒 この端末の記憶を消す</button>
+  </div>
+</div>
+
+<div id="boardScroll">
+  <div id="board">
+    <svg id="strings" xmlns="http://www.w3.org/2000/svg"></svg>
+    <!-- 付箋はJSで挿入 -->
+  </div>
+</div>
+
+<button id="pasteFab">📋 貼り付けて新規付箋</button>
+
+<div id="colorPicker">
+  <span style="background:#f5e27a" data-color="yellow"></span>
+  <span style="background:#f3afc4" data-color="pink"></span>
+  <span style="background:#b7e4c7" data-color="mint"></span>
+  <span style="background:#a9d6e5" data-color="sky"></span>
+</div>
+
+<div id="toast"></div>
+
+<div id="trashPanel">
+  <button id="closeTrash">✕</button>
+  <h2>🗑️ ゴミ箱</h2>
+  <div id="trashList"></div>
+  <p id="trashEmpty">ゴミ箱は空です</p>
+</div>
+
+<div id="passGate" class="hidden">
+  <div class="box">
+    <h2>🔒 合言葉を入力</h2>
+    <p id="passGateDesc">この端末では初めてです。合言葉を決めてください（12文字以上推奨）。<br>内容はこの合言葉から作った鍵でSupabase保存前に暗号化されます。</p>
+    <input type="password" id="passInput" placeholder="合言葉" autocomplete="off" />
+    <button id="passSubmit">開く</button>
+    <p class="err" id="passErr"></p>
+  </div>
+</div>
+
+<script>
+/* =========================================================
+   設定 — ご自身のSupabaseプロジェクトの値に置き換えてください
+   ========================================================= */
+const SUPABASE_URL = "YOUR_SUPABASE_URL";       // 例: https://xxxxxxxx.supabase.co
+const SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_KEY";
+
+const NOTE_COLORS = ["yellow","pink","mint","sky"];
+
+/* ========================================================= */
+
+let sb = null;
+let configured = SUPABASE_URL.startsWith("http") && SUPABASE_ANON_KEY.length > 20;
+
+if (configured) {
+  sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+} else {
+  document.body.insertAdjacentHTML("beforeend", `
+    <div id="configWarning">
+      <div>
+        <p><strong>Supabaseの接続設定がまだです。</strong></p>
+        <p>index.html 上部の <code>SUPABASE_URL</code> と <code>SUPABASE_ANON_KEY</code> を、
+        あなたのSupabaseプロジェクトの値に書き換えてください。<br>
+        テーブルは同梱の <code>schema.sql</code> をSupabaseのSQL Editorで実行して作成します。</p>
+      </div>
+    </div>
+  `);
+}
+
+const boardEl = document.getElementById("board");
+const boardScrollEl = document.getElementById("boardScroll");
+const stringsEl = document.getElementById("strings");
+const colorPicker = document.getElementById("colorPicker");
+const toastEl = document.getElementById("toast");
+const trashPanel = document.getElementById("trashPanel");
+const trashListEl = document.getElementById("trashList");
+const trashCountEl = document.getElementById("trashCount");
+const trashEmptyEl = document.getElementById("trashEmpty");
+const syncDot = document.getElementById("syncDot");
+const syncLabel = document.getElementById("syncLabel");
+
+let notes = new Map();      // id -> {id, content, x, y, color, rotation, el}
+let connections = new Map();// id -> {id, from_note_id, to_note_id}
+let trashed = new Map();
+
+let masterKey = null; // CryptoKey（合言葉から導出したAES-GCM鍵）
+const passGateEl = document.getElementById("passGate");
+const passGateDesc = document.getElementById("passGateDesc");
+const passInput = document.getElementById("passInput");
+const passSubmit = document.getElementById("passSubmit");
+const passErr = document.getElementById("passErr");
+
+let dragState = null;       // {id, offsetX, offsetY}
+let linkMode = false;
+let linkSource = null;
+
+let pendingNewNoteColor = "yellow";
+let pendingNewNoteXY = null;
+
+/* ---------------- ユーティリティ ---------------- */
+function uuid() {
+  return crypto.randomUUID ? crypto.randomUUID() : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random()*16|0, v = c === 'x' ? r : (r&0x3|0x8);
+    return v.toString(16);
+  });
+}
+function showToast(msg) {
+  toastEl.textContent = msg;
+  toastEl.classList.add("show");
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(() => toastEl.classList.remove("show"), 1600);
+}
+function randRotation() { return (Math.random() * 6 - 3).toFixed(1); }
+
+/* ---------------- 合言葉暗号化（AES-GCM / PBKDF2） ---------------- */
+function bytesToBase64(bytes) {
+  let binary = "";
+  bytes.forEach(b => binary += String.fromCharCode(b));
+  return btoa(binary);
+}
+function base64ToBytes(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+async function deriveKeyFromPassphrase(passphrase, saltB64) {
+  const enc = new TextEncoder();
+  const salt = base64ToBytes(saltB64);
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw", enc.encode(passphrase), { name: "PBKDF2" }, false, ["deriveKey"]
+  );
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations: 200000, hash: "SHA-256" },
+    keyMaterial,
+    { name: "AES-GCM", length: 256 },
+    true, // 端末保存のためexportable
+    ["encrypt", "decrypt"]
+  );
+}
+async function encryptText(plaintext) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const enc = new TextEncoder();
+  const buf = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, masterKey, enc.encode(plaintext));
+  return { content: bytesToBase64(new Uint8Array(buf)), iv: bytesToBase64(iv) };
+}
+async function decryptText(ciphertextB64, ivB64) {
+  const iv = base64ToBytes(ivB64);
+  const ciphertext = base64ToBytes(ciphertextB64);
+  const buf = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, masterKey, ciphertext);
+  return new TextDecoder().decode(buf);
+}
+
+/* IndexedDB — 端末に鍵を記憶（iOS Safariでも消えにくい） */
+const IDB_NAME = "scribble_notepad_secure";
+const IDB_STORE = "keys";
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbSet(key, value) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, "readwrite");
+    tx.objectStore(IDB_STORE).put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function idbGet(key) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, "readonly");
+    const req = tx.objectStore(IDB_STORE).get(key);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbDel(key) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, "readwrite");
+    tx.objectStore(IDB_STORE).delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function getOrCreateSalt() {
+  const { data, error } = await sb.from("scribble_meta").select("*").eq("id", "salt").maybeSingle();
+  if (data) return data.value;
+  const saltBytes = crypto.getRandomValues(new Uint8Array(16));
+  const saltB64 = bytesToBase64(saltBytes);
+  await sb.from("scribble_meta").insert({ id: "salt", value: saltB64 });
+  return saltB64;
+}
+
+async function tryLoadRememberedKey() {
+  const raw = await idbGet("cryptoKeyRaw").catch(() => null);
+  if (!raw) return false;
+  masterKey = await crypto.subtle.importKey("raw", raw, { name: "AES-GCM" }, true, ["encrypt", "decrypt"]);
+  return true;
+}
+
+async function unlockWithPassphrase(passphrase) {
+  const saltB64 = await getOrCreateSalt();
+  const key = await deriveKeyFromPassphrase(passphrase, saltB64);
+  // 既存の付箋が1件でもあれば、それで合言葉が正しいか検証する
+  const { data: sample } = await sb.from("scribble_notes")
+    .select("content, iv").eq("deleted", false).limit(1).maybeSingle();
+  if (sample && sample.content) {
+    try {
+      const iv = base64ToBytes(sample.iv);
+      const ciphertext = base64ToBytes(sample.content);
+      await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
+    } catch {
+      throw new Error("合言葉が違うようです");
+    }
+  }
+  masterKey = key;
+  const raw = new Uint8Array(await crypto.subtle.exportKey("raw", key));
+  await idbSet("cryptoKeyRaw", raw);
+}
+
+async function ensureUnlocked() {
+  if (!configured) return; // 未設定時は暗号化ゲートをスキップ
+  const remembered = await tryLoadRememberedKey();
+  if (remembered) return;
+
+  const { data: existingSalt } = await sb.from("scribble_meta").select("*").eq("id", "salt").maybeSingle();
+  passGateDesc.textContent = existingSalt
+    ? "この端末では合言葉が必要です。いつもの合言葉を入力してください。"
+    : "初めての利用です。合言葉を決めてください（12文字以上推奨）。この合言葉から作った鍵で、Supabase保存前に内容を暗号化します。";
+
+  passGateEl.classList.remove("hidden");
+  await new Promise((resolve) => {
+    passSubmit.addEventListener("click", async function handler() {
+      const val = passInput.value;
+      if (!val) return;
+      passErr.textContent = "";
+      passSubmit.disabled = true;
+      try {
+        await unlockWithPassphrase(val);
+        passSubmit.removeEventListener("click", handler);
+        passGateEl.classList.add("hidden");
+        resolve();
+      } catch (e) {
+        passErr.textContent = e.message || "開けませんでした";
+        passInput.value = "";
+        passInput.focus();
+      } finally {
+        passSubmit.disabled = false;
+      }
+    });
+  });
+}
+passInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") passSubmit.click();
+});
+document.getElementById("forgetBtn").addEventListener("click", async () => {
+  if (!confirm("この端末に記憶した合言葉の鍵を消します。次回開くときに合言葉の再入力が必要になります。よろしいですか？")) return;
+  await idbDel("cryptoKeyRaw");
+  location.reload();
+});
+
+/* ---------------- 付箋の描画 ---------------- */
+function renderNote(note) {
+  let el = note.el;
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "sticky note-" + note.color;
+    el.dataset.id = note.id;
+    el.style.transform = `rotate(${note.rotation}deg)`;
+    el.innerHTML = `
+      <div class="pin" title="ドラッグして移動 / タップでつなぐ"></div>
+      <textarea placeholder="…" spellcheck="false"></textarea>
+      <div class="toolbar">
+        <button class="btn-copy" title="コピー">📋</button>
+        <button class="btn-link" title="つなぐ">🧵</button>
+        <button class="btn-del" title="削除">🗑️</button>
+      </div>
+    `;
+    boardEl.appendChild(el);
+    note.el = el;
+    attachNoteEvents(note);
+  }
+  el.style.left = note.x + "px";
+  el.style.top = note.y + "px";
+  el.className = "sticky note-" + note.color;
+  const ta = el.querySelector("textarea");
+  if (document.activeElement !== ta) ta.value = note.content;
+}
+
+function attachNoteEvents(note) {
+  const el = note.el;
+  const pin = el.querySelector(".pin");
+  const ta = el.querySelector("textarea");
+  const btnCopy = el.querySelector(".btn-copy");
+  const btnLink = el.querySelector(".btn-link");
+  const btnDel = el.querySelector(".btn-del");
+
+  // ドラッグ（ピン部分から開始）
+  pin.addEventListener("pointerdown", (e) => {
+    if (linkMode) { handleLinkClick(note.id); return; }
+    e.preventDefault();
+    pin.setPointerCapture(e.pointerId);
+    const rect = el.getBoundingClientRect();
+    const boardRect = boardEl.getBoundingClientRect();
+    dragState = {
+      id: note.id,
+      startX: e.clientX,
+      startY: e.clientY,
+      origX: note.x,
+      origY: note.y
+    };
+    el.classList.add("dragging");
+  });
+  pin.addEventListener("pointermove", (e) => {
+    if (!dragState || dragState.id !== note.id) return;
+    const dx = e.clientX - dragState.startX;
+    const dy = e.clientY - dragState.startY;
+    note.x = dragState.origX + dx;
+    note.y = dragState.origY + dy;
+    el.style.left = note.x + "px";
+    el.style.top = note.y + "px";
+    drawStrings();
+  });
+  pin.addEventListener("pointerup", (e) => {
+    if (!dragState || dragState.id !== note.id) return;
+    el.classList.remove("dragging");
+    dragState = null;
+    saveNotePosition(note);
+  });
+
+  // テキスト編集
+  ta.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      ta.blur();
+    }
+  });
+  ta.addEventListener("focus", () => el.classList.add("editing"));
+  ta.addEventListener("blur", () => {
+    el.classList.remove("editing");
+    if (note.content !== ta.value) {
+      note.content = ta.value;
+      saveNoteContent(note);
+    }
+  });
+
+  // コピー
+  btnCopy.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(note.content || "");
+      showToast("コピーしました");
+    } catch {
+      showToast("コピーに失敗しました");
+    }
+  });
+
+  // つなぐ
+  btnLink.addEventListener("click", (e) => {
+    e.stopPropagation();
+    enterLinkMode(note.id);
+  });
+
+  // 削除
+  btnDel.addEventListener("click", (e) => {
+    e.stopPropagation();
+    deleteNote(note.id);
+  });
+
+  // リンクモード中に付箋本体クリックでもつなげる
+  el.addEventListener("click", (e) => {
+    if (linkMode && e.target === el) handleLinkClick(note.id);
+  });
+}
+
+/* ---------------- 接続線（赤い糸） ---------------- */
+function drawStrings() {
+  stringsEl.innerHTML = "";
+  connections.forEach(conn => {
+    const a = notes.get(conn.from_note_id);
+    const b = notes.get(conn.to_note_id);
+    if (!a || !b) return;
+    const ax = a.x + 90, ay = a.y + 5;
+    const bx = b.x + 90, by = b.y + 5;
+    const midY = (ay + by) / 2 + 40;
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", `M ${ax} ${ay} Q ${(ax+bx)/2} ${midY} ${bx} ${by}`);
+    path.setAttribute("stroke", "#b23a2e");
+    path.setAttribute("stroke-width", "2.5");
+    path.setAttribute("fill", "none");
+    path.setAttribute("opacity", "0.85");
+    path.style.cursor = "pointer";
+    path.style.pointerEvents = "stroke";
+    path.addEventListener("click", () => {
+      if (confirm("この糸を切りますか？")) removeConnection(conn.id);
+    });
+    stringsEl.appendChild(path);
+
+    [[ax,ay],[bx,by]].forEach(([x,y]) => {
+      const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+      dot.setAttribute("cx", x); dot.setAttribute("cy", y); dot.setAttribute("r", 3.5);
+      dot.setAttribute("fill", "#8a1f1f");
+      stringsEl.appendChild(dot);
+    });
+  });
+}
+
+/* ---------------- リンクモード ---------------- */
+function enterLinkMode(sourceId) {
+  linkMode = true;
+  linkSource = sourceId;
+  document.getElementById("linkModeBtn").textContent = "🧵 相手をタップ (キャンセルは再クリック)";
+  notes.forEach(n => n.el && n.el.classList.toggle("linksrc", n.id === sourceId));
+}
+function exitLinkMode() {
+  linkMode = false;
+  linkSource = null;
+  document.getElementById("linkModeBtn").textContent = "🧵 つなぐ";
+  notes.forEach(n => n.el && n.el.classList.remove("linksrc"));
+}
+function handleLinkClick(targetId) {
+  if (!linkMode) return;
+  if (targetId === linkSource) { exitLinkMode(); return; }
+  createConnection(linkSource, targetId);
+  exitLinkMode();
+}
+document.getElementById("linkModeBtn").addEventListener("click", () => {
+  if (linkMode) { exitLinkMode(); return; }
+  showToast("つなぎたい付箋のピンを2つタップしてください");
+  linkMode = true;
+  linkSource = null;
+  document.getElementById("linkModeBtn").textContent = "🧵 1つ目をタップ";
+});
+
+/* board全体でのリンク開始用（ピン以外からも拾う） */
+boardEl.addEventListener("pointerdown", (e) => {
+  const stickyEl = e.target.closest(".sticky");
+  if (linkMode && stickyEl) {
+    const id = stickyEl.dataset.id;
+    if (linkSource === null) {
+      linkSource = id;
+      document.getElementById("linkModeBtn").textContent = "🧵 相手をタップ (再クリックでキャンセル)";
+      notes.forEach(n => n.el && n.el.classList.toggle("linksrc", n.id === id));
+    } else {
+      handleLinkClick(id);
+    }
+  }
+});
+
+/* ---------------- 新規付箋作成 ---------------- */
+boardEl.addEventListener("click", (e) => {
+  if (linkMode) return;
+  if (e.target.closest(".sticky")) return;
+  if (e.target.closest("#colorPicker")) return;
+  const boardRect = boardEl.getBoundingClientRect();
+  const x = e.clientX - boardRect.left - 90;
+  const y = e.clientY - boardRect.top - 65;
+  startNewNote(x, y);
+});
+
+function startNewNote(x, y) {
+  const note = {
+    id: uuid(),
+    content: "",
+    x, y,
+    color: pendingNewNoteColor,
+    rotation: randRotation(),
+    _new: true
+  };
+  notes.set(note.id, note);
+  renderNote(note);
+  note.el.classList.add("new-note");
+  const ta = note.el.querySelector("textarea");
+  requestAnimationFrame(() => ta.focus());
+
+  const finalize = async () => {
+    ta.removeEventListener("blur", finalize);
+    note.el.classList.remove("new-note");
+    if (!ta.value.trim()) {
+      notes.delete(note.id);
+      note.el.remove();
+      return;
+    }
+    note.content = ta.value;
+    delete note._new;
+    await insertNote(note);
+  };
+  ta.addEventListener("blur", finalize);
+}
+
+document.getElementById("pasteFab").addEventListener("click", async () => {
+  try {
+    const text = await navigator.clipboard.readText();
+    if (!text) { showToast("クリップボードが空です"); return; }
+    const scrollL = boardScrollEl.scrollLeft, scrollT = boardScrollEl.scrollTop;
+    const x = scrollL + 140 + Math.random()*60;
+    const y = scrollT + 120 + Math.random()*60;
+    const note = {
+      id: uuid(), content: text, x, y,
+      color: pendingNewNoteColor, rotation: randRotation()
+    };
+    notes.set(note.id, note);
+    renderNote(note);
+    await insertNote(note);
+    showToast("貼り付けました");
+  } catch {
+    showToast("クリップボードを読み取れませんでした");
+  }
+});
+
+/* ---------------- 削除 / ゴミ箱 ---------------- */
+async function deleteNote(id) {
+  const note = notes.get(id);
+  if (!note) return;
+  notes.delete(id);
+  note.el && note.el.remove();
+  // 関連する接続も除去
+  [...connections.values()].forEach(c => {
+    if (c.from_note_id === id || c.to_note_id === id) connections.delete(c.id);
+  });
+  drawStrings();
+  trashed.set(id, note);
+  renderTrash();
+  if (configured) {
+    await sb.from("scribble_notes").update({ deleted: true, updated_at: new Date().toISOString() }).eq("id", id);
+  }
+}
+
+function renderTrash() {
+  trashListEl.innerHTML = "";
+  trashCountEl.textContent = trashed.size;
+  trashEmptyEl.style.display = trashed.size ? "none" : "block";
+  trashed.forEach(note => {
+    const item = document.createElement("div");
+    item.className = "trash-item";
+    item.innerHTML = `
+      <p>${(note.content || "(空の付箋)").replace(/</g,"&lt;")}</p>
+      <div class="row">
+        <button class="restore">復元</button>
+        <button class="purge">完全に削除</button>
+      </div>
+    `;
+    item.querySelector(".restore").addEventListener("click", () => restoreNote(note.id));
+    item.querySelector(".purge").addEventListener("click", () => purgeNote(note.id));
+    trashListEl.appendChild(item);
+  });
+}
+async function restoreNote(id) {
+  const note = trashed.get(id);
+  if (!note) return;
+  trashed.delete(id);
+  note.el = null;
+  notes.set(id, note);
+  renderNote(note);
+  renderTrash();
+  if (configured) {
+    await sb.from("scribble_notes").update({ deleted: false, updated_at: new Date().toISOString() }).eq("id", id);
+  }
+}
+async function purgeNote(id) {
+  trashed.delete(id);
+  renderTrash();
+  if (configured) {
+    await sb.from("scribble_notes").delete().eq("id", id);
+  }
+}
+
+document.getElementById("trashBtn").addEventListener("click", () => trashPanel.classList.add("open"));
+document.getElementById("closeTrash").addEventListener("click", () => trashPanel.classList.remove("open"));
+
+/* ---------------- Supabase 保存処理 ---------------- */
+async function insertNote(note) {
+  if (!configured) return;
+  const enc = await encryptText(note.content);
+  await sb.from("scribble_notes").insert({
+    id: note.id, content: enc.content, iv: enc.iv, x: note.x, y: note.y,
+    color: note.color, rotation: note.rotation, deleted: false
+  });
+}
+async function saveNoteContent(note) {
+  if (!configured) return;
+  const enc = await encryptText(note.content);
+  await sb.from("scribble_notes").update({
+    content: enc.content, iv: enc.iv, updated_at: new Date().toISOString()
+  }).eq("id", note.id);
+}
+async function saveNotePosition(note) {
+  if (!configured) return;
+  await sb.from("scribble_notes").update({
+    x: note.x, y: note.y, updated_at: new Date().toISOString()
+  }).eq("id", note.id);
+}
+async function createConnection(fromId, toId) {
+  const id = uuid();
+  connections.set(id, { id, from_note_id: fromId, to_note_id: toId });
+  drawStrings();
+  if (configured) {
+    await sb.from("scribble_connections").insert({ id, from_note_id: fromId, to_note_id: toId });
+  }
+}
+async function removeConnection(id) {
+  connections.delete(id);
+  drawStrings();
+  if (configured) {
+    await sb.from("scribble_connections").delete().eq("id", id);
+  }
+}
+
+/* ---------------- 初期読み込み & Realtime ---------------- */
+async function loadAll() {
+  if (!configured) return;
+  const { data: noteRows, error: e1 } = await sb.from("scribble_notes").select("*");
+  if (e1) { console.error(e1); syncFail(); return; }
+  const { data: connRows, error: e2 } = await sb.from("scribble_connections").select("*");
+  if (e2) { console.error(e2); syncFail(); return; }
+
+  notes.forEach(n => n.el && n.el.remove());
+  notes.clear();
+  trashed.clear();
+  connections.clear();
+
+  for (const row of (noteRows || [])) {
+    let content = "";
+    try {
+      content = row.content ? await decryptText(row.content, row.iv) : "";
+    } catch {
+      content = "🔒（この端末の合言葉では復号できません）";
+    }
+    const note = { id: row.id, content, x: row.x, y: row.y, color: row.color, rotation: row.rotation };
+    if (row.deleted) trashed.set(row.id, note);
+    else { notes.set(row.id, note); renderNote(note); }
+  }
+  (connRows || []).forEach(row => {
+    connections.set(row.id, row);
+  });
+  drawStrings();
+  renderTrash();
+}
+
+function syncFail() {
+  syncDot.classList.add("off");
+  syncLabel.textContent = "同期エラー";
+}
+
+let refetchTimer = null;
+function scheduleRefetch() {
+  if (dragState) { setTimeout(scheduleRefetch, 400); return; } // ドラッグ中は避ける
+  clearTimeout(refetchTimer);
+  refetchTimer = setTimeout(loadAll, 350);
+}
+
+async function initRealtime() {
+  if (!configured) return;
+  await ensureUnlocked();
+  await loadAll();
+  sb.channel("scribble-sync")
+    .on("postgres_changes", { event: "*", schema: "public", table: "scribble_notes" }, scheduleRefetch)
+    .on("postgres_changes", { event: "*", schema: "public", table: "scribble_connections" }, scheduleRefetch)
+    .subscribe((status) => {
+      if (status === "SUBSCRIBED") {
+        syncDot.classList.remove("off");
+        syncLabel.textContent = "同期中";
+      }
+    });
+}
+
+/* ---------------- 色ピッカー（新規付箋の色） ---------------- */
+colorPicker.classList.add("show");
+colorPicker.style.position = "fixed";
+colorPicker.style.left = "14px";
+colorPicker.style.bottom = "18px";
+colorPicker.querySelectorAll("span").forEach(sp => {
+  sp.addEventListener("click", () => {
+    pendingNewNoteColor = sp.dataset.color;
+    colorPicker.querySelectorAll("span").forEach(s => s.style.outline = "");
+    sp.style.outline = "2px solid #fff";
+  });
+});
+colorPicker.querySelector("span").style.outline = "2px solid #fff";
+
+initRealtime();
+</script>
+</body>
+</html>
