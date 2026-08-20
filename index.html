@@ -378,6 +378,8 @@ let connections = new Map();// id -> {id, from_note_id, to_note_id}
 let trashed = new Map();
 
 let masterKey = null; // CryptoKey（合言葉から導出したAES-GCM鍵）
+let protectedIds = new Set();     // 作成中/編集中/保存中/ドラッグ中の付箋ID（同期の全消去から保護）
+let protectedConnIds = new Set(); // 作成中/削除中の接続ID
 const passGateEl = document.getElementById("passGate");
 const passGateDesc = document.getElementById("passGateDesc");
 const passInput = document.getElementById("passInput");
@@ -623,11 +625,12 @@ function attachNoteEvents(note) {
     el.style.top = note.y + "px";
     drawStrings();
   });
-  pin.addEventListener("pointerup", (e) => {
+  pin.addEventListener("pointerup", async (e) => {
     if (!dragState || dragState.id !== note.id) return;
     el.classList.remove("dragging");
     dragState = null;
-    saveNotePosition(note);
+    protectedIds.add(note.id);
+    try { await saveNotePosition(note); } finally { protectedIds.delete(note.id); }
   });
 
   // テキスト編集
@@ -638,11 +641,12 @@ function attachNoteEvents(note) {
     }
   });
   ta.addEventListener("focus", () => el.classList.add("editing"));
-  ta.addEventListener("blur", () => {
+  ta.addEventListener("blur", async () => {
     el.classList.remove("editing");
     if (note.content !== ta.value) {
       note.content = ta.value;
-      saveNoteContent(note);
+      protectedIds.add(note.id);
+      try { await saveNoteContent(note); } finally { protectedIds.delete(note.id); }
     }
   });
 
@@ -784,8 +788,13 @@ function startNewNote(x, y) {
       return;
     }
     note.content = ta.value;
-    delete note._new;
-    await insertNote(note);
+    protectedIds.add(note.id);
+    try {
+      await insertNote(note);
+    } finally {
+      delete note._new;
+      protectedIds.delete(note.id);
+    }
   };
   ta.addEventListener("blur", finalize);
 }
@@ -803,7 +812,12 @@ document.getElementById("pasteFab").addEventListener("click", async () => {
     };
     notes.set(note.id, note);
     renderNote(note);
-    await insertNote(note);
+    protectedIds.add(note.id);
+    try {
+      await insertNote(note);
+    } finally {
+      protectedIds.delete(note.id);
+    }
     showToast("貼り付けました");
   } catch {
     showToast("クリップボードを読み取れませんでした");
@@ -814,18 +828,16 @@ document.getElementById("pasteFab").addEventListener("click", async () => {
 async function deleteNote(id) {
   const note = notes.get(id);
   if (!note) return;
+  protectedIds.add(id);
   notes.delete(id);
   note.el && note.el.remove();
-  // 関連する接続も除去
-  [...connections.values()].forEach(c => {
-    if (c.from_note_id === id || c.to_note_id === id) connections.delete(c.id);
-  });
   drawStrings();
   trashed.set(id, note);
   renderTrash();
   if (configured) {
     await sb.from("scribble_notes").update({ deleted: true, updated_at: new Date().toISOString() }).eq("id", id);
   }
+  protectedIds.delete(id);
 }
 
 function renderTrash() {
@@ -850,21 +862,26 @@ function renderTrash() {
 async function restoreNote(id) {
   const note = trashed.get(id);
   if (!note) return;
+  protectedIds.add(id);
   trashed.delete(id);
   note.el = null;
   notes.set(id, note);
   renderNote(note);
   renderTrash();
+  drawStrings();
   if (configured) {
     await sb.from("scribble_notes").update({ deleted: false, updated_at: new Date().toISOString() }).eq("id", id);
   }
+  protectedIds.delete(id);
 }
 async function purgeNote(id) {
+  protectedIds.add(id);
   trashed.delete(id);
   renderTrash();
   if (configured) {
     await sb.from("scribble_notes").delete().eq("id", id);
   }
+  protectedIds.delete(id);
 }
 
 document.getElementById("trashBtn").addEventListener("click", () => trashPanel.classList.add("open"));
@@ -895,20 +912,36 @@ async function saveNotePosition(note) {
 async function createConnection(fromId, toId) {
   const id = uuid();
   connections.set(id, { id, from_note_id: fromId, to_note_id: toId });
+  protectedConnIds.add(id);
   drawStrings();
   if (configured) {
     await sb.from("scribble_connections").insert({ id, from_note_id: fromId, to_note_id: toId });
   }
+  protectedConnIds.delete(id);
 }
 async function removeConnection(id) {
+  protectedConnIds.add(id);
   connections.delete(id);
   drawStrings();
   if (configured) {
     await sb.from("scribble_connections").delete().eq("id", id);
   }
+  protectedConnIds.delete(id);
 }
 
 /* ---------------- 初期読み込み & Realtime ---------------- */
+function isProtected(id) {
+  if (protectedIds.has(id)) return true;
+  if (dragState && dragState.id === id) return true;
+  const note = notes.get(id);
+  if (note && note._new) return true;
+  if (note && note.el) {
+    const ta = note.el.querySelector("textarea");
+    if (document.activeElement === ta) return true;
+  }
+  return false;
+}
+
 async function loadAll() {
   if (!configured) return;
   const { data: noteRows, error: e1 } = await sb.from("scribble_notes").select("*");
@@ -916,25 +949,58 @@ async function loadAll() {
   const { data: connRows, error: e2 } = await sb.from("scribble_connections").select("*");
   if (e2) { console.error(e2); syncFail(); return; }
 
-  notes.forEach(n => n.el && n.el.remove());
-  notes.clear();
-  trashed.clear();
-  connections.clear();
+  const newTrashed = new Map();
+  const seenIds = new Set();
 
   for (const row of (noteRows || [])) {
+    seenIds.add(row.id);
+    // 作成中・編集中・保存中・ドラッグ中の付箋はローカルの状態を優先し、この周では触らない
+    if (isProtected(row.id)) continue;
+
     let content = "";
     try {
       content = row.content ? await decryptText(row.content, row.iv) : "";
     } catch {
       content = "🔒（この端末の合言葉では復号できません）";
     }
-    const note = { id: row.id, content, x: row.x, y: row.y, color: row.color, rotation: row.rotation };
-    if (row.deleted) trashed.set(row.id, note);
-    else { notes.set(row.id, note); renderNote(note); }
+
+    if (row.deleted) {
+      const prior = notes.get(row.id);
+      if (prior) { prior.el && prior.el.remove(); notes.delete(row.id); }
+      newTrashed.set(row.id, { id: row.id, content, x: row.x, y: row.y, color: row.color, rotation: row.rotation });
+    } else {
+      const existing = notes.get(row.id);
+      if (existing) {
+        existing.x = row.x; existing.y = row.y; existing.color = row.color;
+        existing.rotation = row.rotation; existing.content = content;
+        renderNote(existing);
+      } else {
+        const note = { id: row.id, content, x: row.x, y: row.y, color: row.color, rotation: row.rotation };
+        notes.set(row.id, note);
+        renderNote(note);
+      }
+    }
   }
-  (connRows || []).forEach(row => {
-    connections.set(row.id, row);
+
+  // 保護中のためこの周でスキップした付箋は、元々あったマップにそのまま残す
+  trashed.forEach((note, id) => { if (isProtected(id)) newTrashed.set(id, note); });
+
+  // フェッチ結果に存在せず、かつ保護もされていない付箋（他端末での完全削除等）は除去
+  [...notes.keys()].forEach(id => {
+    if (!seenIds.has(id) && !isProtected(id)) {
+      const n = notes.get(id);
+      n.el && n.el.remove();
+      notes.delete(id);
+    }
   });
+
+  trashed = newTrashed;
+
+  const newConnections = new Map();
+  (connRows || []).forEach(row => { if (!protectedConnIds.has(row.id)) newConnections.set(row.id, row); });
+  connections.forEach((c, id) => { if (protectedConnIds.has(id)) newConnections.set(id, c); });
+  connections = newConnections;
+
   drawStrings();
   renderTrash();
 }
@@ -946,7 +1012,6 @@ function syncFail() {
 
 let refetchTimer = null;
 function scheduleRefetch() {
-  if (dragState) { setTimeout(scheduleRefetch, 400); return; } // ドラッグ中は避ける
   clearTimeout(refetchTimer);
   refetchTimer = setTimeout(loadAll, 350);
 }
