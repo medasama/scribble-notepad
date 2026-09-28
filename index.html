@@ -58,50 +58,74 @@
     overflow:visible;
   }
 
+  /* 付箋：幅・高さは文字量に合わせてJSで自動調整 */
   .sticky{
     position:absolute;
-    width:180px;
-    min-height:130px;
+    min-width:110px;
     padding:22px 14px 34px 14px;
     background: var(--note-yellow);
     box-shadow: var(--paper-shadow);
     border-radius:2px 2px 6px 6px;
     font-family:'Yomogi', sans-serif;
     color: var(--ink);
-    cursor: grab;
+    cursor: default;
     touch-action:none;
-    transition: box-shadow .15s ease;
+    transition: box-shadow .15s ease, filter .15s ease;
     user-select:none;
+    -webkit-user-select:none;
+    -webkit-touch-callout:none;
   }
+  .sticky.pressing{ filter: brightness(.93); }
   .sticky.dragging{
     cursor: grabbing;
     z-index: 500;
     box-shadow: 0 16px 30px rgba(0,0,0,.45);
+    filter:none;
   }
   .sticky.linksrc{
     outline: 3px solid var(--string);
     outline-offset: 2px;
   }
+  /* ドラッグ中、離すとつながる相手 */
+  .sticky.link-hint{
+    outline: 3px dashed var(--string);
+    outline-offset: 4px;
+  }
   .sticky .pin{
     position:absolute;
     top:-9px; left:50%; transform:translateX(-50%);
-    width:16px; height:16px;
+    width:18px; height:18px;
     border-radius:50%;
     background: radial-gradient(circle at 35% 30%, #e2665a, var(--pin));
     box-shadow: 0 3px 4px rgba(0,0,0,.4);
-    cursor: crosshair;
+    cursor: grab;
     z-index:2;
   }
+  /* ピンの当たり判定を広げる（指で掴みやすく） */
+  .sticky .pin::after{
+    content:""; position:absolute; inset:-10px; border-radius:50%;
+  }
   .sticky textarea{
-    width:100%; height:100%;
-    min-height:80px;
+    display:block;
+    width:60px; height:24px;
+    min-height:24px;
+    margin:0; padding:0;
     resize:none;
     border:none; outline:none;
     background:transparent;
+    overflow:hidden;
     font-family:'Yomogi', sans-serif;
     font-size:16px;
     line-height:1.5;
     color: var(--ink);
+    overflow-wrap:anywhere;
+    /* 編集中以外はタップ・長押しを付箋本体に渡す */
+    pointer-events:none;
+    user-select:text;
+    -webkit-user-select:text;
+  }
+  .sticky.editing textarea{
+    pointer-events:auto;
     cursor:text;
   }
   .sticky .toolbar{
@@ -109,10 +133,15 @@
     bottom:4px; right:6px;
     display:flex; gap:4px;
     opacity:0;
+    pointer-events:none;
     transition: opacity .12s ease;
   }
-  .sticky:hover .toolbar, .sticky.editing .toolbar{
+  .sticky.editing .toolbar{
     opacity:1;
+    pointer-events:auto;
+  }
+  @media (hover:hover){
+    .sticky:hover .toolbar{ opacity:1; pointer-events:auto; }
   }
   .sticky .toolbar button{
     border:none;
@@ -341,6 +370,13 @@ const SUPABASE_ANON_KEY = "sb_publishable_GVtanlT_gDwSEQSsZPC_NQ_nEK-60x2";
 
 const NOTE_COLORS = ["yellow","pink","mint","sky"];
 
+/* 操作まわりの調整値 */
+const LONG_PRESS_MS = 400;   // 長押しと判定するまでの時間
+const MOVE_TOLERANCE = 8;    // 長押し待ちの間にこれ以上動いたらキャンセル(px)
+const TOUCH_MARGIN = 4;      // これだけ近づいたら「くっついた」とみなす(px)
+const TEXT_MIN_W = 60;       // 本文エリアの最小幅(px)
+const TEXT_MAX_W = 260;      // 本文エリアの最大幅(px)。超えると折り返し
+
 /* ========================================================= */
 
 let sb = null;
@@ -386,7 +422,10 @@ const passInput = document.getElementById("passInput");
 const passSubmit = document.getElementById("passSubmit");
 const passErr = document.getElementById("passErr");
 
-let dragState = null;       // {id, offsetX, offsetY}
+let dragState = null;   // {ids, startX, startY, pointerId, origs}
+let pressState = null;  // 長押し待ち {id, el, pointerId, startX, startY, timer}
+let pendingTapId = null;// 短いタップ → 編集開始する付箋ID
+let linkHintIds = new Set();
 let linkMode = false;
 let linkSource = null;
 
@@ -563,16 +602,37 @@ document.getElementById("forgetBtn").addEventListener("click", async () => {
   location.reload();
 });
 
+/* ---------------- 付箋サイズの自動調整 ---------------- */
+const measurer = document.createElement("div");
+measurer.style.cssText = [
+  "position:absolute", "left:-9999px", "top:0", "visibility:hidden",
+  "display:inline-block", "white-space:pre-wrap", "overflow-wrap:anywhere",
+  "font-family:'Yomogi',sans-serif", "font-size:16px", "line-height:1.5",
+  `max-width:${TEXT_MAX_W}px`
+].join(";");
+document.body.appendChild(measurer);
+
+function autoSize(note) {
+  if (!note.el) return;
+  const ta = note.el.querySelector("textarea");
+  const text = ta.value || ta.placeholder || "";
+  // 末尾の改行も1行として測れるようにゼロ幅スペースを足す
+  measurer.textContent = text + "\u200b";
+  const w = Math.min(TEXT_MAX_W, Math.max(TEXT_MIN_W, Math.ceil(measurer.getBoundingClientRect().width) + 6));
+  ta.style.width = w + "px";
+  ta.style.height = "0px";
+  ta.style.height = ta.scrollHeight + "px";
+}
+
 /* ---------------- 付箋の描画 ---------------- */
 function renderNote(note) {
   let el = note.el;
   if (!el) {
     el = document.createElement("div");
-    el.className = "sticky note-" + note.color;
+    el.className = "sticky";
     el.dataset.id = note.id;
-    el.style.transform = `rotate(${note.rotation}deg)`;
     el.innerHTML = `
-      <div class="pin" title="ドラッグして移動 / タップでつなぐ"></div>
+      <div class="pin" title="引っ張ると、つながった付箋ごと動きます"></div>
       <textarea placeholder="…" spellcheck="false"></textarea>
       <div class="toolbar">
         <button class="btn-copy" title="コピー">📋</button>
@@ -584,11 +644,23 @@ function renderNote(note) {
     note.el = el;
     attachNoteEvents(note);
   }
+  el.style.transform = `rotate(${note.rotation}deg)`;
   el.style.left = note.x + "px";
   el.style.top = note.y + "px";
-  el.className = "sticky note-" + note.color;
+  // editing / dragging 等の状態クラスは残し、色だけ差し替える
+  NOTE_COLORS.forEach(c => el.classList.remove("note-" + c));
+  el.classList.add("note-" + note.color);
   const ta = el.querySelector("textarea");
   if (document.activeElement !== ta) ta.value = note.content;
+  autoSize(note);
+}
+
+function focusNoteText(note) {
+  const ta = note.el.querySelector("textarea");
+  note.el.classList.add("editing");
+  ta.focus();
+  const len = ta.value.length;
+  try { ta.setSelectionRange(len, len); } catch {}
 }
 
 function attachNoteEvents(note) {
@@ -599,62 +671,81 @@ function attachNoteEvents(note) {
   const btnLink = el.querySelector(".btn-link");
   const btnDel = el.querySelector(".btn-del");
 
-  // ドラッグ（ピン部分から開始）
+  // 赤いピン：すぐに掴めて、つながった付箋ごと動く
   pin.addEventListener("pointerdown", (e) => {
-    if (linkMode) { handleLinkClick(note.id); return; }
+    if (linkMode) return; // つなぐモード中は board 側のハンドラに任せる
+    if (e.button !== undefined && e.button !== 0) return;
     e.preventDefault();
-    pin.setPointerCapture(e.pointerId);
-    const rect = el.getBoundingClientRect();
-    const boardRect = boardEl.getBoundingClientRect();
-    dragState = {
-      id: note.id,
-      startX: e.clientX,
-      startY: e.clientY,
-      origX: note.x,
-      origY: note.y
+    e.stopPropagation();
+    cancelPress();
+    if (document.activeElement === ta) ta.blur();
+    startDrag(getGroup(note.id), e.clientX, e.clientY, e.pointerId, pin);
+  });
+
+  // 付箋のどこでも：長押しでその付箋だけ動く／短いタップで編集
+  el.addEventListener("pointerdown", (e) => {
+    if (linkMode) return;
+    if (e.button !== undefined && e.button !== 0) return;
+    if (e.target.closest(".toolbar") || e.target.closest(".pin")) return;
+    if (el.classList.contains("editing") && e.target === ta) return; // 編集中の本文は通常の文字選択
+    cancelPress();
+    pendingTapId = null;
+    const startX = e.clientX, startY = e.clientY, pointerId = e.pointerId;
+    el.classList.add("pressing");
+    pressState = {
+      id: note.id, el, pointerId, startX, startY,
+      timer: setTimeout(() => {
+        if (!pressState || pressState.id !== note.id) return;
+        cancelPress();
+        if (document.activeElement === ta) ta.blur();
+        if (navigator.vibrate) navigator.vibrate(15);
+        startDrag([note.id], startX, startY, pointerId, el);
+      }, LONG_PRESS_MS)
     };
-    el.classList.add("dragging");
   });
-  pin.addEventListener("pointermove", (e) => {
-    if (!dragState || dragState.id !== note.id) return;
-    const dx = e.clientX - dragState.startX;
-    const dy = e.clientY - dragState.startY;
-    note.x = dragState.origX + dx;
-    note.y = dragState.origY + dy;
-    el.style.left = note.x + "px";
-    el.style.top = note.y + "px";
-    drawStrings();
+
+  // 短いタップは click で編集開始（iOSでキーボードを確実に出すため）
+  el.addEventListener("click", (e) => {
+    if (pendingTapId !== note.id) return;
+    pendingTapId = null;
+    if (e.target.closest(".toolbar")) return;
+    focusNoteText(note);
   });
-  pin.addEventListener("pointerup", async (e) => {
-    if (!dragState || dragState.id !== note.id) return;
-    el.classList.remove("dragging");
-    dragState = null;
-    protectedIds.add(note.id);
-    try { await saveNotePosition(note); } finally { protectedIds.delete(note.id); }
+
+  // Android の長押しメニューを抑止（編集中は通常どおり）
+  el.addEventListener("contextmenu", (e) => {
+    if (!el.classList.contains("editing")) e.preventDefault();
   });
 
   // テキスト編集
   ta.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       ta.blur();
     }
   });
+  ta.addEventListener("input", () => {
+    autoSize(note);
+    drawStrings();
+  });
   ta.addEventListener("focus", () => el.classList.add("editing"));
   ta.addEventListener("blur", async () => {
-    el.classList.remove("editing");
-    if (note.content !== ta.value) {
+    // ツールバーのボタンを押す間だけ表示を保つため少し遅らせる
+    setTimeout(() => {
+      if (document.activeElement !== ta) el.classList.remove("editing");
+    }, 250);
+    if (note.content !== ta.value && !note._new) {
       note.content = ta.value;
       protectedIds.add(note.id);
       try { await saveNoteContent(note); } finally { protectedIds.delete(note.id); }
     }
   });
 
-  // コピー
+  // コピー（編集途中の内容もそのままコピー）
   btnCopy.addEventListener("click", async (e) => {
     e.stopPropagation();
     try {
-      await navigator.clipboard.writeText(note.content || "");
+      await navigator.clipboard.writeText(ta.value || "");
       showToast("コピーしました");
     } catch {
       showToast("コピーに失敗しました");
@@ -672,22 +763,163 @@ function attachNoteEvents(note) {
     e.stopPropagation();
     deleteNote(note.id);
   });
+}
 
-  // リンクモード中に付箋本体クリックでもつなげる
-  el.addEventListener("click", (e) => {
-    if (linkMode && e.target === el) handleLinkClick(note.id);
+/* ---------------- ドラッグ（単体 / グループ共通） ---------------- */
+function cancelPress() {
+  if (!pressState) return;
+  clearTimeout(pressState.timer);
+  pressState.el.classList.remove("pressing");
+  pressState = null;
+}
+
+function startDrag(ids, startX, startY, pointerId, captureEl) {
+  const origs = new Map();
+  ids.forEach(id => {
+    const n = notes.get(id);
+    if (n) origs.set(id, { x: n.x, y: n.y });
   });
+  dragState = { ids: [...origs.keys()], startX, startY, pointerId, origs };
+  dragState.ids.forEach(id => notes.get(id).el.classList.add("dragging"));
+  try { captureEl.setPointerCapture(pointerId); } catch {}
+}
+
+window.addEventListener("pointermove", (e) => {
+  if (pressState && e.pointerId === pressState.pointerId) {
+    if (Math.hypot(e.clientX - pressState.startX, e.clientY - pressState.startY) > MOVE_TOLERANCE) {
+      cancelPress();
+    }
+    return;
+  }
+  if (!dragState || e.pointerId !== dragState.pointerId) return;
+  const dx = e.clientX - dragState.startX;
+  const dy = e.clientY - dragState.startY;
+  dragState.ids.forEach(id => {
+    const n = notes.get(id);
+    if (!n || !n.el) return;
+    const o = dragState.origs.get(id);
+    n.x = o.x + dx;
+    n.y = o.y + dy;
+    n.el.style.left = n.x + "px";
+    n.el.style.top = n.y + "px";
+  });
+  drawStrings();
+  updateLinkHints(findTouchPairs(dragState.ids));
+});
+
+function onPointerEnd(e) {
+  if (pressState && e.pointerId === pressState.pointerId) {
+    const id = pressState.id;
+    cancelPress();
+    if (e.type === "pointerup") pendingTapId = id; // 長押しに届かなかった＝タップ
+    return;
+  }
+  if (dragState && e.pointerId === dragState.pointerId) endDrag();
+}
+window.addEventListener("pointerup", onPointerEnd);
+window.addEventListener("pointercancel", onPointerEnd);
+
+async function endDrag() {
+  const st = dragState;
+  dragState = null;
+  updateLinkHints([]);
+  st.ids.forEach(id => { const n = notes.get(id); n && n.el && n.el.classList.remove("dragging"); });
+
+  const movedIds = st.ids.filter(id => {
+    const n = notes.get(id), o = st.origs.get(id);
+    return n && (n.x !== o.x || n.y !== o.y);
+  });
+  if (!movedIds.length) return;
+
+  const pairs = findTouchPairs(st.ids);
+
+  st.ids.forEach(id => protectedIds.add(id));
+  try {
+    await Promise.all(movedIds.map(id => saveNotePosition(notes.get(id))));
+  } finally {
+    st.ids.forEach(id => protectedIds.delete(id));
+  }
+
+  for (const [a, b] of pairs) await createConnection(a, b);
+  if (pairs.length) showToast("🧵 つなぎました");
+}
+
+/* ---------------- グループ・接触判定 ---------------- */
+function getGroup(startId) {
+  const seen = new Set([startId]);
+  const queue = [startId];
+  while (queue.length) {
+    const cur = queue.shift();
+    connections.forEach(c => {
+      let other = null;
+      if (c.from_note_id === cur) other = c.to_note_id;
+      else if (c.to_note_id === cur) other = c.from_note_id;
+      if (other && !seen.has(other) && notes.has(other)) {
+        seen.add(other);
+        queue.push(other);
+      }
+    });
+  }
+  return [...seen];
+}
+
+function isConnected(a, b) {
+  for (const c of connections.values()) {
+    if ((c.from_note_id === a && c.to_note_id === b) || (c.from_note_id === b && c.to_note_id === a)) return true;
+  }
+  return false;
+}
+
+function rectOf(note) {
+  return { l: note.x, t: note.y, r: note.x + note.el.offsetWidth, b: note.y + note.el.offsetHeight };
+}
+function overlaps(a, b, m) {
+  return a.l < b.r + m && a.r + m > b.l && a.t < b.b + m && a.b + m > b.t;
+}
+
+/* 動かしている付箋が、まだつながっていない付箋に触れていれば [動かした側, 相手] を返す（相手1件につき1本） */
+function findTouchPairs(movingIds) {
+  const moving = new Set(movingIds);
+  const pairs = [];
+  const usedTargets = new Set();
+  movingIds.forEach(aid => {
+    const a = notes.get(aid);
+    if (!a || !a.el) return;
+    const ra = rectOf(a);
+    notes.forEach((b, bid) => {
+      if (moving.has(bid) || usedTargets.has(bid) || !b.el) return;
+      if (overlaps(ra, rectOf(b), TOUCH_MARGIN) && !isConnected(aid, bid)) {
+        pairs.push([aid, bid]);
+        usedTargets.add(bid);
+      }
+    });
+  });
+  return pairs;
+}
+
+function updateLinkHints(pairs) {
+  const next = new Set(pairs.map(p => p[1]));
+  linkHintIds.forEach(id => {
+    if (!next.has(id)) { const n = notes.get(id); n && n.el && n.el.classList.remove("link-hint"); }
+  });
+  next.forEach(id => { const n = notes.get(id); n && n.el && n.el.classList.add("link-hint"); });
+  linkHintIds = next;
 }
 
 /* ---------------- 接続線（赤い糸） ---------------- */
+function pinPoint(note) {
+  const w = note.el ? note.el.offsetWidth : 180;
+  return [note.x + w / 2, note.y + 5];
+}
+
 function drawStrings() {
   stringsEl.innerHTML = "";
   connections.forEach(conn => {
     const a = notes.get(conn.from_note_id);
     const b = notes.get(conn.to_note_id);
     if (!a || !b) return;
-    const ax = a.x + 90, ay = a.y + 5;
-    const bx = b.x + 90, by = b.y + 5;
+    const [ax, ay] = pinPoint(a);
+    const [bx, by] = pinPoint(b);
     const midY = (ay + by) / 2 + 40;
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
     path.setAttribute("d", `M ${ax} ${ay} Q ${(ax+bx)/2} ${midY} ${bx} ${by}`);
@@ -697,7 +929,8 @@ function drawStrings() {
     path.setAttribute("opacity", "0.85");
     path.style.cursor = "pointer";
     path.style.pointerEvents = "stroke";
-    path.addEventListener("click", () => {
+    path.addEventListener("click", (e) => {
+      e.stopPropagation();
       if (confirm("この糸を切りますか？")) removeConnection(conn.id);
     });
     stringsEl.appendChild(path);
@@ -711,7 +944,7 @@ function drawStrings() {
   });
 }
 
-/* ---------------- リンクモード ---------------- */
+/* ---------------- リンクモード（ボタンで手動でつなぐ） ---------------- */
 function enterLinkMode(sourceId) {
   linkMode = true;
   linkSource = sourceId;
@@ -725,20 +958,20 @@ function exitLinkMode() {
   notes.forEach(n => n.el && n.el.classList.remove("linksrc"));
 }
 function handleLinkClick(targetId) {
-  if (!linkMode) return;
+  if (!linkMode || !linkSource) return;
   if (targetId === linkSource) { exitLinkMode(); return; }
-  createConnection(linkSource, targetId);
+  if (!isConnected(linkSource, targetId)) createConnection(linkSource, targetId);
   exitLinkMode();
 }
 document.getElementById("linkModeBtn").addEventListener("click", () => {
   if (linkMode) { exitLinkMode(); return; }
-  showToast("つなぎたい付箋のピンを2つタップしてください");
+  showToast("つなぎたい付箋を2つタップしてください");
   linkMode = true;
   linkSource = null;
   document.getElementById("linkModeBtn").textContent = "🧵 1つ目をタップ";
 });
 
-/* board全体でのリンク開始用（ピン以外からも拾う） */
+/* つなぐモード中のタップはここで一括処理（ピン・本体どちらでも） */
 boardEl.addEventListener("pointerdown", (e) => {
   const stickyEl = e.target.closest(".sticky");
   if (linkMode && stickyEl) {
@@ -759,8 +992,8 @@ boardEl.addEventListener("click", (e) => {
   if (e.target.closest(".sticky")) return;
   if (e.target.closest("#colorPicker")) return;
   const boardRect = boardEl.getBoundingClientRect();
-  const x = e.clientX - boardRect.left - 90;
-  const y = e.clientY - boardRect.top - 65;
+  const x = e.clientX - boardRect.left - 55;
+  const y = e.clientY - boardRect.top - 30;
   startNewNote(x, y);
 });
 
@@ -777,7 +1010,7 @@ function startNewNote(x, y) {
   renderNote(note);
   note.el.classList.add("new-note");
   const ta = note.el.querySelector("textarea");
-  requestAnimationFrame(() => ta.focus());
+  requestAnimationFrame(() => focusNoteText(note));
 
   const finalize = async () => {
     ta.removeEventListener("blur", finalize);
@@ -785,6 +1018,7 @@ function startNewNote(x, y) {
     if (!ta.value.trim()) {
       notes.delete(note.id);
       note.el.remove();
+      drawStrings();
       return;
     }
     note.content = ta.value;
@@ -831,6 +1065,7 @@ async function deleteNote(id) {
   protectedIds.add(id);
   notes.delete(id);
   note.el && note.el.remove();
+  note.el = null;
   drawStrings();
   trashed.set(id, note);
   renderTrash();
@@ -904,12 +1139,13 @@ async function saveNoteContent(note) {
   }).eq("id", note.id);
 }
 async function saveNotePosition(note) {
-  if (!configured) return;
+  if (!configured || !note) return;
   await sb.from("scribble_notes").update({
     x: note.x, y: note.y, updated_at: new Date().toISOString()
   }).eq("id", note.id);
 }
 async function createConnection(fromId, toId) {
+  if (!fromId || !toId || fromId === toId) return;
   const id = uuid();
   connections.set(id, { id, from_note_id: fromId, to_note_id: toId });
   protectedConnIds.add(id);
@@ -932,7 +1168,7 @@ async function removeConnection(id) {
 /* ---------------- 初期読み込み & Realtime ---------------- */
 function isProtected(id) {
   if (protectedIds.has(id)) return true;
-  if (dragState && dragState.id === id) return true;
+  if (dragState && dragState.ids.includes(id)) return true;
   const note = notes.get(id);
   if (note && note._new) return true;
   if (note && note.el) {
@@ -1029,6 +1265,14 @@ async function initRealtime() {
         syncLabel.textContent = "同期中";
       }
     });
+}
+
+/* Webフォント(Yomogi)の読み込み完了後にサイズを測り直す */
+if (document.fonts && document.fonts.ready) {
+  document.fonts.ready.then(() => {
+    notes.forEach(n => autoSize(n));
+    drawStrings();
+  });
 }
 
 /* ---------------- 色ピッカー（新規付箋の色） ---------------- */
