@@ -374,6 +374,7 @@ const NOTE_COLORS = ["yellow","pink","mint","sky"];
 const LONG_PRESS_MS = 400;   // 長押しと判定するまでの時間
 const MOVE_TOLERANCE = 8;    // 長押し待ちの間にこれ以上動いたらキャンセル(px)
 const TOUCH_MARGIN = 4;      // これだけ近づいたら「くっついた」とみなす(px)
+const CONNECT_GAP = 36;      // つながった後、付箋同士を離しておく距離(px)
 const TEXT_MIN_W = 60;       // 本文エリアの最小幅(px)
 const TEXT_MAX_W = 260;      // 本文エリアの最大幅(px)。超えると折り返し
 
@@ -693,13 +694,11 @@ function attachNoteEvents(note) {
     const startX = e.clientX, startY = e.clientY, pointerId = e.pointerId;
     el.classList.add("pressing");
     pressState = {
-      id: note.id, el, pointerId, startX, startY,
+      id: note.id, el, pointerId, startX, startY, pointerType: e.pointerType,
       timer: setTimeout(() => {
         if (!pressState || pressState.id !== note.id) return;
-        cancelPress();
-        if (document.activeElement === ta) ta.blur();
         if (navigator.vibrate) navigator.vibrate(15);
-        startDrag([note.id], startX, startY, pointerId, el);
+        beginPressDrag();
       }, LONG_PRESS_MS)
     };
   });
@@ -784,12 +783,27 @@ function startDrag(ids, startX, startY, pointerId, captureEl) {
   try { captureEl.setPointerCapture(pointerId); } catch {}
 }
 
+/* 長押し待ち → その付箋だけのドラッグへ移行 */
+function beginPressDrag() {
+  const p = pressState;
+  if (!p) return;
+  cancelPress();
+  const ta = p.el.querySelector("textarea");
+  if (document.activeElement === ta) ta.blur();
+  startDrag([p.id], p.startX, p.startY, p.pointerId, p.el);
+}
+
 window.addEventListener("pointermove", (e) => {
   if (pressState && e.pointerId === pressState.pointerId) {
-    if (Math.hypot(e.clientX - pressState.startX, e.clientY - pressState.startY) > MOVE_TOLERANCE) {
+    if (Math.hypot(e.clientX - pressState.startX, e.clientY - pressState.startY) <= MOVE_TOLERANCE) return;
+    if (pressState.pointerType === "mouse") {
+      // PC(マウス)は長押し不要：押したまま動かせばすぐ移動
+      beginPressDrag();
+    } else {
+      // タッチは長押し前に動いたらキャンセル
       cancelPress();
+      return;
     }
-    return;
   }
   if (!dragState || e.pointerId !== dragState.pointerId) return;
   const dx = e.clientX - dragState.startX;
@@ -831,17 +845,63 @@ async function endDrag() {
   });
   if (!movedIds.length) return;
 
-  const pairs = findTouchPairs(st.ids);
-
   st.ids.forEach(id => protectedIds.add(id));
   try {
-    await Promise.all(movedIds.map(id => saveNotePosition(notes.get(id))));
+    const pairs = findTouchPairs(st.ids);
+    if (pairs.length) {
+      // くっついた相手から少し離れた位置へスッと移動させてから糸でつなぐ
+      const [ox, oy] = computeSeparation(pairs);
+      if (ox || oy) await animateMove(st.ids, ox, oy, 220);
+    }
+    await Promise.all(st.ids.filter(id => notes.get(id)).map(id => saveNotePosition(notes.get(id))));
+    for (const [a, b] of pairs) await createConnection(a, b);
+    if (pairs.length) showToast("🧵 つなぎました");
   } finally {
     st.ids.forEach(id => protectedIds.delete(id));
   }
+}
 
-  for (const [a, b] of pairs) await createConnection(a, b);
-  if (pairs.length) showToast("🧵 つなぎました");
+/* 動かした側（グループ全体）をどれだけずらせば、相手と CONNECT_GAP 分離れるか */
+function computeSeparation(pairs) {
+  let ox = 0, oy = 0;
+  pairs.forEach(([aid, bid]) => {
+    const a = notes.get(aid), b = notes.get(bid);
+    if (!a || !a.el || !b || !b.el) return;
+    const ra = rectOf(a), rb = rectOf(b);
+    const l = ra.l + ox, r = ra.r + ox, t = ra.t + oy, bt = ra.b + oy;
+    // 既に十分離れていれば何もしない
+    if (l >= rb.r + CONNECT_GAP || r <= rb.l - CONNECT_GAP ||
+        t >= rb.b + CONNECT_GAP || bt <= rb.t - CONNECT_GAP) return;
+    const needX = (l + r) / 2 >= (rb.l + rb.r) / 2 ? (rb.r + CONNECT_GAP - l) : (rb.l - CONNECT_GAP - r);
+    const needY = (t + bt) / 2 >= (rb.t + rb.b) / 2 ? (rb.b + CONNECT_GAP - t) : (rb.t - CONNECT_GAP - bt);
+    // 少ない移動で済む方向（左右 or 上下）に離す
+    if (Math.abs(needX) <= Math.abs(needY)) ox += needX; else oy += needY;
+  });
+  return [ox, oy];
+}
+
+function animateMove(ids, dx, dy, ms) {
+  const starts = new Map();
+  ids.forEach(id => { const n = notes.get(id); if (n && n.el) starts.set(id, { x: n.x, y: n.y }); });
+  return new Promise(resolve => {
+    const t0 = performance.now();
+    function step(now) {
+      const k = Math.min(1, (now - t0) / ms);
+      const ease = 1 - Math.pow(1 - k, 3);
+      starts.forEach((s, id) => {
+        const n = notes.get(id);
+        if (!n || !n.el) return;
+        n.x = s.x + dx * ease;
+        n.y = s.y + dy * ease;
+        if (k === 1) { n.x = Math.round(n.x); n.y = Math.round(n.y); }
+        n.el.style.left = n.x + "px";
+        n.el.style.top = n.y + "px";
+      });
+      drawStrings();
+      if (k < 1) requestAnimationFrame(step); else resolve();
+    }
+    requestAnimationFrame(step);
+  });
 }
 
 /* ---------------- グループ・接触判定 ---------------- */
